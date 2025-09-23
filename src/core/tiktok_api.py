@@ -16,6 +16,8 @@ class TikTokAPI:
         self.BASE_URL = "https://www.tiktok.com"
         self.WEBCAST_URL = "https://webcast.tiktok.com"
         self.API_URL = "https://www.tiktok.com/api-live/user/room/"
+        self.EULER_API = "https://tiktok.eulerstream.com"
+        self.TIKREC_API = "https://tikrec.com"
 
         self.http_client = HttpClient(proxy, cookies).req
         self._http_client_stream = HttpClient(proxy, cookies).req_stream
@@ -110,12 +112,13 @@ class TikTokAPI:
 
         return user, room_id
 
-    def get_room_id_from_user(self, user: str) -> str:
-        """
-        Given a username, I get the room_id
-        """
+    def _old_get_room_id_from_user(self, user: str) -> str:
+        params = {"uniqueId": user, "giftInfo": "false"}
+
         response = self.http_client.get(
-            self.API_URL, params={"uniqueId": user, "sourceType": 54, "aid": 1988}
+            f"{self.EULER_API}/webcast/room_info",
+            params=params,
+            headers={"x-api-key": ""},
         )
 
         if response.status_code != 200:
@@ -123,15 +126,35 @@ class TikTokAPI:
 
         data = response.json()
 
-        if (
-            data.get("data")
-            and data["data"].get("user")
-            and data["data"]["user"].get("roomId")
-        ):
-            room_id = data["data"]["user"]["roomId"]
-            return room_id
-        else:
+        room_id = data.get("data", {}).get("room_info", {}).get("id")
+        if not room_id:
             raise UserLiveError(TikTokError.ROOM_ID_ERROR)
+
+        return room_id
+
+    def _tikrec_get_room_id_signed_url(self, user: str) -> str:
+        response = self.http_client.get(
+            f"{self.TIKREC_API}/tiktok/room/api/sign",
+            params={"unique_id": user},
+        )
+
+        data = response.json()
+
+        signed_url = data.get("signed_url")
+        return signed_url
+
+    def get_room_id_from_user(self, user: str) -> str | None:
+        """Given a username, get the room_id."""
+        signed_url = self._tikrec_get_room_id_signed_url(user)
+
+        response = self.http_client.get(signed_url)
+        content = response.text
+
+        if not content or "Please wait" in content:
+            raise UserLiveError(TikTokError.WAF_BLOCKED)
+
+        data = response.json()
+        return (data.get("data") or {}).get("user", {}).get("roomId")
 
     def get_followers_list(self, sec_uid) -> list:
         """
@@ -185,7 +208,7 @@ class TikTokAPI:
 
         return followers
 
-    def get_live_url(self, room_id: str) -> str:
+    def get_live_url(self, room_id: str) -> str | None:
         """
         Return the cdn (flv or m3u8) of the streaming
         """
@@ -243,9 +266,7 @@ class TikTokAPI:
         return best_flv
 
     def download_live_stream(self, live_url: str):
-        """
-        Generator che restituisce lo streaming live per un dato room_id.
-        """
+        """Generator that returns the live stream for a given room_id."""
         stream = self._http_client_stream.get(live_url, stream=True)
         for chunk in stream.iter_content(chunk_size=4096):
             if chunk:
